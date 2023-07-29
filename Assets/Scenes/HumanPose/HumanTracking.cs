@@ -1,6 +1,7 @@
-﻿using OpenCVForUnity.CoreModule;
+using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.ImgprocModule;
 using OpenCVForUnity.TrackingModule;
+using OpenCVForUnity.ObjdetectModule;
 using OpenCVForUnity.UnityUtils;
 using OpenCVForUnity.UnityUtils.Helper;
 using OpenCVForUnity.VideoModule;
@@ -19,22 +20,17 @@ namespace OpenCVForUnityExample
     /// http://docs.opencv.org/trunk/d5/d07/tutorial_multitracker.html
     /// </summary>
     [RequireComponent(typeof(WebCamTextureToMatHelper))]
-    public class TrackingExample : MonoBehaviour
+    public class HumanTracking : MonoBehaviour
     {
         /// <summary>
-        /// The trackerKFC Toggle.
+        /// The requested tracker dropdown.
         /// </summary>
-        public Toggle trackerKCFToggle;
+        public Dropdown requestedTrackerDropdown;
 
         /// <summary>
-        /// The trackerCSRT Toggle.
+        /// The requested resolution.
         /// </summary>
-        public Toggle trackerCSRTToggle;
-
-        /// <summary>
-        /// The trackerMIL Toggle.
-        /// </summary>
-        public Toggle trackerMILToggle;
+        public TrackerPreset requestedTracker = TrackerPreset._KCF;
 
         /// <summary>
         /// The requested resolution.
@@ -52,19 +48,24 @@ namespace OpenCVForUnityExample
         Texture2D texture;
 
         /// <summary>
+        /// The HOGDescriptor.
+        /// </summary>
+        HOGDescriptor des;
+
+        /// <summary>
         /// The trackers.
         /// </summary>
-        List<TrackerSetting> trackers;
+        TrackerSetting tracker;
 
         /// <summary>
-        /// The selected point list.
+        /// The current frame index in the video stream % frameCheckTracker.
         /// </summary>
-        List<Point> selectedPointList;
+        int frameCurrent = 0;
 
         /// <summary>
-        /// The stored touch point.
+        /// The frame index when the Intersection over Union (IoU) of the tracker and detector will be checked.
         /// </summary>
-        Point storedTouchPoint;
+        int frameCheckTracker;
 
         /// <summary>
         /// The webcam texture to mat helper.
@@ -80,6 +81,7 @@ namespace OpenCVForUnityExample
         void Start()
         {
             fpsMonitor = GetComponent<FpsMonitor>();
+            frameCheckTracker = (int)requestedFPS * 3;
 
             webCamTextureToMatHelper = gameObject.GetComponent<WebCamTextureToMatHelper>();
             int width, height;
@@ -89,6 +91,9 @@ namespace OpenCVForUnityExample
             webCamTextureToMatHelper.requestedFPS = (int)requestedFPS;
             webCamTextureToMatHelper.outputColorFormat = WebCamTextureToMatHelper.ColorFormat.RGB;
             webCamTextureToMatHelper.Initialize();
+
+            // Update GUI state
+            requestedTrackerDropdown.value = (int)requestedTracker;
         }
 
         /// <summary>
@@ -123,10 +128,9 @@ namespace OpenCVForUnityExample
                 Camera.main.orthographicSize = height / 2;
             }
 
-
-            trackers = new List<TrackerSetting>();
-
-            selectedPointList = new List<Point>();
+            des = new HOGDescriptor();
+            des.setSVMDetector(HOGDescriptor.getDefaultPeopleDetector());
+            tracker = null;
         }
 
         /// <summary>
@@ -163,225 +167,113 @@ namespace OpenCVForUnityExample
             if (!webCamTextureToMatHelper.IsInitialized())
                 return;
 
-#if ((UNITY_ANDROID || UNITY_IOS) && !UNITY_EDITOR)
-            //Touch
-            int touchCount = Input.touchCount;
-            if (touchCount == 1)
+            if (webCamTextureToMatHelper.IsPlaying() && webCamTextureToMatHelper.DidUpdateThisFrame())
             {
-                Touch t = Input.GetTouch(0);
-                if(t.phase == TouchPhase.Ended && !EventSystem.current.IsPointerOverGameObject (t.fingerId)) {
-                    storedTouchPoint = new Point (t.position.x, t.position.y);
-                    //Debug.Log ("touch X " + t.position.x);
-                    //Debug.Log ("touch Y " + t.position.y);
-                }
-            }
-#else
-            //Mouse
-            if (Input.GetMouseButtonUp(0) && !EventSystem.current.IsPointerOverGameObject())
-            {
-                storedTouchPoint = new Point(Input.mousePosition.x, Input.mousePosition.y);
-                //Debug.Log ("mouse X " + Input.mousePosition.x);
-                //Debug.Log ("mouse Y " + Input.mousePosition.y);
-            }
-#endif
+                Mat rgbMat = webCamTextureToMatHelper.GetMat();
 
-            if (selectedPointList.Count != 1)
-            {
-                if (!webCamTextureToMatHelper.IsPlaying())
-                    webCamTextureToMatHelper.Play();
+                if (0 == frameCurrent || frameCurrent == frameCheckTracker || tracker == null) {
 
-                if (webCamTextureToMatHelper.IsPlaying() && webCamTextureToMatHelper.DidUpdateThisFrame())
-                {
-                    Mat rgbMat = webCamTextureToMatHelper.GetMat();
-
-                    if (storedTouchPoint != null)
+                    using (MatOfRect locations = new MatOfRect())
+                    using (MatOfDouble weights = new MatOfDouble())
                     {
-                        ConvertScreenPointToTexturePoint(storedTouchPoint, storedTouchPoint, gameObject, texture.width, texture.height);
-                        OnTouch(storedTouchPoint, texture.width, texture.height);
-                        storedTouchPoint = null;
-                    }
+                        des.detectMultiScale(rgbMat, locations, weights);
 
-                    if (selectedPointList.Count == 1)
-                    {
-                        foreach (var point in selectedPointList)
-                        {
-                            Imgproc.circle(rgbMat, point, 6, new Scalar(0, 0, 255), 2);
+                        if (locations.size().height == 0) {
+                            return;
                         }
-                    }
-                    else if (selectedPointList.Count == 2)
-                    {
-                        ResetTrackers();
 
-                        using (MatOfPoint selectedPointMat = new MatOfPoint(selectedPointList.ToArray()))
-                        {
-                            Rect region = Imgproc.boundingRect(selectedPointMat);
+                        Rect region = locations.toArray()[0];
+
+                        if (tracker == null || CalculateIoU(region, tracker.boundingBox) < 0.5) {
+                            
+                            ResetTrackers();
 
                             // init trackers.
-                            if (trackerKCFToggle.isOn)
+                            switch (requestedTracker)
                             {
-                                TrackerKCF trackerKCF = TrackerKCF.create(new TrackerKCF_Params());
-                                trackerKCF.init(rgbMat, region);
-                                trackers.Add(new TrackerSetting(trackerKCF, trackerKCF.GetType().Name.ToString(), new Scalar(255, 0, 0)));
-                            }
-
-                            if (trackerCSRTToggle.isOn)
-                            {
-                                TrackerCSRT trackerCSRT = TrackerCSRT.create(new TrackerCSRT_Params());
-                                trackerCSRT.init(rgbMat, region);
-                                trackers.Add(new TrackerSetting(trackerCSRT, trackerCSRT.GetType().Name.ToString(), new Scalar(0, 255, 0)));
-                            }
-
-                            if (trackerMILToggle.isOn)
-                            {
-                                TrackerMIL trackerMIL = TrackerMIL.create(new TrackerMIL_Params());
-                                trackerMIL.init(rgbMat, region);
-                                trackers.Add(new TrackerSetting(trackerMIL, trackerMIL.GetType().Name.ToString(), new Scalar(0, 0, 255)));
-                            }
-                        }
-
-                        selectedPointList.Clear();
-
-                        if (trackers.Count > 0)
-                        {
-                            if (fpsMonitor != null)
-                            {
-                                fpsMonitor.consoleText = "";
-                            }
-
-                            trackerKCFToggle.interactable = trackerCSRTToggle.interactable = trackerMILToggle.interactable = false;
-                        }
-                    }
-
-                    // update trackers.
-                    for (int i = 0; i < trackers.Count; i++)
-                    {
-                        Tracker tracker = trackers[i].tracker;
-                        string label = trackers[i].label;
-                        Scalar lineColor = trackers[i].lineColor;
-                        Rect boundingBox = trackers[i].boundingBox;
-
-                        tracker.update(rgbMat, boundingBox);
-
-                        Imgproc.rectangle(rgbMat, boundingBox.tl(), boundingBox.br(), lineColor, 2, 1, 0);
-                        Imgproc.putText(rgbMat, label, new Point(boundingBox.x, boundingBox.y - 5), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, lineColor, 1, Imgproc.LINE_AA, false);
-                    }
-
-                    if (trackers.Count == 0)
-                    {
-                        if (selectedPointList.Count != 1)
-                        {
-                            //Imgproc.putText (rgbMat, "Please touch the screen, and select tracking regions.", new Point (5, rgbMat.rows () - 10), Imgproc.FONT_HERSHEY_SIMPLEX, 0.8, new Scalar (255, 255, 255, 255), 2, Imgproc.LINE_AA, false);
-                            if (fpsMonitor != null)
-                            {
-                                fpsMonitor.consoleText = "Please touch the screen, and select tracking regions.";
-                            }
-                        }
-                        else
-                        {
-                            //Imgproc.putText (rgbMat, "Please select the end point of the new tracking region.", new Point (5, rgbMat.rows () - 10), Imgproc.FONT_HERSHEY_SIMPLEX, 0.8, new Scalar (255, 255, 255, 255), 2, Imgproc.LINE_AA, false);
-                            if (fpsMonitor != null)
-                            {
-                                fpsMonitor.consoleText = "Please select the end point of the new tracking region.";
+                                case TrackerPreset._KCF:
+                                    TrackerKCF trackerKCF = TrackerKCF.create(new TrackerKCF_Params());
+                                    trackerKCF.init(rgbMat, region);
+                                    tracker = new TrackerSetting(trackerKCF, trackerKCF.GetType().Name.ToString(), new Scalar(255, 0, 0));
+                                    break;
+                                case TrackerPreset._CSRT:
+                                    TrackerCSRT trackerCSRT = TrackerCSRT.create(new TrackerCSRT_Params());
+                                    trackerCSRT.init(rgbMat, region);
+                                    tracker = new TrackerSetting(trackerCSRT, trackerCSRT.GetType().Name.ToString(), new Scalar(0, 255, 0));
+                                    break;
+                                case TrackerPreset._MIL:
+                                    TrackerMIL trackerMIL = TrackerMIL.create(new TrackerMIL_Params());
+                                    trackerMIL.init(rgbMat, region);
+                                    tracker = new TrackerSetting(trackerMIL, trackerMIL.GetType().Name.ToString(), new Scalar(0, 0, 255));
+                                    break;
                             }
                         }
                     }
-
-                    Utils.matToTexture2D(rgbMat, texture);
                 }
-            }
-            else
-            {
-                if (webCamTextureToMatHelper.IsPlaying())
-                    webCamTextureToMatHelper.Pause();
 
-                if (storedTouchPoint != null)
-                {
-                    ConvertScreenPointToTexturePoint(storedTouchPoint, storedTouchPoint, gameObject, texture.width, texture.height);
-                    OnTouch(storedTouchPoint, texture.width, texture.height);
-                    storedTouchPoint = null;
-                }
+                // update trackers.
+                string label = tracker.label;
+                Scalar lineColor = tracker.lineColor;
+                Rect boundingBox = tracker.boundingBox;
+
+                if (frameCurrent != 0) {
+                    tracker.tracker.update(rgbMat, boundingBox);
+                } 
+
+                Imgproc.rectangle(rgbMat, boundingBox.tl(), boundingBox.br(), lineColor, 2, 1, 0);
+                Imgproc.putText(rgbMat, label, new Point(boundingBox.x, boundingBox.y - 5), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, lineColor, 1, Imgproc.LINE_AA, false);
+                
+                frameCurrent = ++frameCurrent % frameCheckTracker;
+                Utils.matToTexture2D(rgbMat, texture);
             }
         }
 
         private void ResetTrackers()
         {
-            if (trackers != null)
+            if (tracker != null)
             {
-                foreach (var t in trackers)
-                {
-                    t.Dispose();
-                }
-                trackers.Clear();
+                tracker.Dispose();
+                tracker = null;
             }
 
-            trackerKCFToggle.interactable = trackerCSRTToggle.interactable = trackerMILToggle.interactable = true;
+            // requestedTrackerDropdown.interactable = true;
         }
 
-        private void OnTouch(Point touchPoint, int textureWidth = -1, int textureHeight = -1)
+        public float CalculateIoU(Rect box1, Rect box2)
         {
-            if (selectedPointList.Count < 2)
-            {
-                selectedPointList.Add(touchPoint);
-                if (!(new OpenCVForUnity.CoreModule.Rect(0, 0, textureWidth, textureHeight).contains(selectedPointList[selectedPointList.Count - 1])))
-                {
-                    selectedPointList.RemoveAt(selectedPointList.Count - 1);
-                }
-            }
+            // Determine the intersection rectangle
+            float x_left = Mathf.Max(box1.x, box2.x);
+            float y_top = Mathf.Max(box1.y, box2.y);
+            float x_right = Mathf.Min(box1.x + box1.width, box2.x + box2.width);
+            float y_bottom = Mathf.Min(box1.y + box1.height, box2.y + box2.height);
+
+            // No intersection, IoU is zero
+            if (x_right < x_left || y_bottom < y_top)
+                return 0.0f;
+
+            // Calculate the area of intersection rectangle
+            float intersection_area = (x_right - x_left) * (y_bottom - y_top);
+
+            // Calculate the area of both rectangles
+            float box1_area = box1.width * box1.height;
+            float box2_area = box2.width * box2.height;
+
+            // Calculate the IoU
+            float iou = intersection_area / (box1_area + box2_area - intersection_area);
+            return iou;
         }
 
         /// <summary>
-        /// Converts the screen point to texture point.
+        /// Raises the requested resolution dropdown value changed event.
         /// </summary>
-        /// <param name="screenPoint">Screen point.</param>
-        /// <param name="dstPoint">Dst point.</param>
-        /// <param name="texturQuad">Texture quad.</param>
-        /// <param name="textureWidth">Texture width.</param>
-        /// <param name="textureHeight">Texture height.</param>
-        /// <param name="camera">Camera.</param>
-        private void ConvertScreenPointToTexturePoint(Point screenPoint, Point dstPoint, GameObject textureQuad, int textureWidth = -1, int textureHeight = -1, Camera camera = null)
+        public void OnRequestedTrackerDropdownValueChanged(int result)
         {
-            if (textureWidth < 0 || textureHeight < 0)
+            if ((int)requestedTracker != result)
             {
-                Renderer r = textureQuad.GetComponent<Renderer>();
-                if (r != null && r.material != null && r.material.mainTexture != null)
-                {
-                    textureWidth = r.material.mainTexture.width;
-                    textureHeight = r.material.mainTexture.height;
-                }
-                else
-                {
-                    textureWidth = (int)textureQuad.transform.localScale.x;
-                    textureHeight = (int)textureQuad.transform.localScale.y;
-                }
+                requestedTracker = (TrackerPreset)result;
             }
 
-            if (camera == null)
-                camera = Camera.main;
-
-            Vector3 quadPosition = textureQuad.transform.localPosition;
-            Vector3 quadScale = textureQuad.transform.localScale;
-
-            Vector2 tl = camera.WorldToScreenPoint(new Vector3(quadPosition.x - quadScale.x / 2, quadPosition.y + quadScale.y / 2, quadPosition.z));
-            Vector2 tr = camera.WorldToScreenPoint(new Vector3(quadPosition.x + quadScale.x / 2, quadPosition.y + quadScale.y / 2, quadPosition.z));
-            Vector2 br = camera.WorldToScreenPoint(new Vector3(quadPosition.x + quadScale.x / 2, quadPosition.y - quadScale.y / 2, quadPosition.z));
-            Vector2 bl = camera.WorldToScreenPoint(new Vector3(quadPosition.x - quadScale.x / 2, quadPosition.y - quadScale.y / 2, quadPosition.z));
-
-            using (Mat srcRectMat = new Mat(4, 1, CvType.CV_32FC2))
-            using (Mat dstRectMat = new Mat(4, 1, CvType.CV_32FC2))
-            {
-                srcRectMat.put(0, 0, tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y);
-                dstRectMat.put(0, 0, 0, 0, quadScale.x, 0, quadScale.x, quadScale.y, 0, quadScale.y);
-
-                using (Mat perspectiveTransform = Imgproc.getPerspectiveTransform(srcRectMat, dstRectMat))
-                using (MatOfPoint2f srcPointMat = new MatOfPoint2f(screenPoint))
-                using (MatOfPoint2f dstPointMat = new MatOfPoint2f())
-                {
-                    Core.perspectiveTransform(srcPointMat, dstPointMat, perspectiveTransform);
-
-                    dstPoint.x = dstPointMat.get(0, 0)[0] * textureWidth / quadScale.x;
-                    dstPoint.y = dstPointMat.get(0, 0)[1] * textureHeight / quadScale.y;
-                }
-            }
+            frameCurrent = 0;
         }
 
         /// <summary>
@@ -391,6 +283,9 @@ namespace OpenCVForUnityExample
         {
             if (webCamTextureToMatHelper != null)
                 webCamTextureToMatHelper.Dispose();
+
+            if (des != null)
+                des.Dispose();
 
             ResetTrackers();
         }
@@ -410,7 +305,15 @@ namespace OpenCVForUnityExample
         {
             ResetTrackers();
 
-            selectedPointList.Clear();
+            frameCurrent = 0;
+        }
+
+        /// <summary>
+        /// Raises the change camera button click event.
+        /// </summary>
+        public void OnChangeCameraButtonClick()
+        {
+            webCamTextureToMatHelper.requestedIsFrontFacing = !webCamTextureToMatHelper.requestedIsFrontFacing;
         }
 
         class TrackerSetting
@@ -436,6 +339,13 @@ namespace OpenCVForUnityExample
                     tracker = null;
                 }
             }
+        }
+
+        public enum TrackerPreset : int
+        {
+            _KCF = 0,
+            _CSRT,
+            _MIL,
         }
 
         public enum FPSPreset : int
