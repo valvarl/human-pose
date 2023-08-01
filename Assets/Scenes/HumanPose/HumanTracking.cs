@@ -1,3 +1,9 @@
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.SceneManagement;
+using UnityEngine.UI;
+
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.ImgprocModule;
 using OpenCVForUnity.TrackingModule;
@@ -5,12 +11,11 @@ using OpenCVForUnity.ObjdetectModule;
 using OpenCVForUnity.UnityUtils;
 using OpenCVForUnity.UnityUtils.Helper;
 using OpenCVForUnity.VideoModule;
-using System.Collections.Generic;
-using UnityEngine;
-using UnityEngine.EventSystems;
-using UnityEngine.SceneManagement;
-using UnityEngine.UI;
 using Rect = OpenCVForUnity.CoreModule.Rect;
+using Utils = OpenCVForUnity.UnityUtils.Utils;
+
+using TensorFlowLite;
+using HumanPose = TensorFlowLite.HumanPose;
 
 namespace OpenCVForUnityExample
 {
@@ -77,11 +82,20 @@ namespace OpenCVForUnityExample
         /// </summary>
         FpsMonitor fpsMonitor;
 
+        [SerializeField, FilePopup("*.tflite")]
+        private string fileName = "lightweight_baseline_choi.tflite";
+
+        /// <summary>
+        /// Pose estimation network.
+        /// </summary>
+        HumanPose humanPose;
+
         // Use this for initialization
         void Start()
         {
             fpsMonitor = GetComponent<FpsMonitor>();
             frameCheckTracker = (int)requestedFPS * 3;
+            humanPose = new HumanPose(fileName);
 
             webCamTextureToMatHelper = gameObject.GetComponent<WebCamTextureToMatHelper>();
             int width, height;
@@ -220,6 +234,11 @@ namespace OpenCVForUnityExample
                     tracker.tracker.update(rgbMat, boundingBox);
                 } 
 
+                if (boundingBox != null && boundingBox.height != 0 && boundingBox.width != 0) {
+                    humanPose.Invoke(rgbMat, boundingBox);
+                    rgbMat = humanPose.DrawResult(rgbMat);
+                } 
+
                 Imgproc.rectangle(rgbMat, boundingBox.tl(), boundingBox.br(), lineColor, 2, 1, 0);
                 Imgproc.putText(rgbMat, label, new Point(boundingBox.x, boundingBox.y - 5), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, lineColor, 1, Imgproc.LINE_AA, false);
                 
@@ -235,8 +254,6 @@ namespace OpenCVForUnityExample
                 tracker.Dispose();
                 tracker = null;
             }
-
-            // requestedTrackerDropdown.interactable = true;
         }
 
         public float CalculateIoU(Rect box1, Rect box2)
@@ -286,6 +303,9 @@ namespace OpenCVForUnityExample
 
             if (des != null)
                 des.Dispose();
+
+            if (humanPose != null)
+                humanPose.Dispose();
 
             ResetTrackers();
         }

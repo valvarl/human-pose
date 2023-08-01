@@ -1609,6 +1609,7 @@ MonoBehaviour:
   requestedTracker: 0
   requestedResolution: 1
   requestedFPS: 30
+  fileName: lightweight_baseline_choi.tflite
 --- !u!1 &1526553565
 GameObject:
   m_ObjectHideFlags: 0
